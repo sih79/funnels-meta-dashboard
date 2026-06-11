@@ -55,7 +55,8 @@ export default function CostPerResultCard({
   const label = tc?.displayName ?? "Conversion";
 
   return (
-    <div className="rounded-xl border border-amber-400/40 bg-amber-400/5 p-5">
+    <div className="group relative overflow-hidden rounded-xl border border-amber-400/30 bg-gradient-to-b from-amber-400/[0.14] via-amber-400/[0.07] to-amber-400/[0.02] p-5 shadow-[0_8px_24px_-12px_rgba(251,191,36,0.45),0_2px_6px_-2px_rgba(0,0,0,0.5)] ring-1 ring-inset ring-amber-200/10 backdrop-blur-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_12px_28px_-12px_rgba(251,191,36,0.55),0_4px_10px_-4px_rgba(0,0,0,0.5)]">
+      <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-amber-200/40 to-transparent" />
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs font-medium uppercase tracking-wider text-neutral-400">
           Cost per result

@@ -13,7 +13,11 @@
 }
 
 body {
-  background: var(--background);
+  background:
+    radial-gradient(1200px 600px at 12% -10%, rgba(251, 191, 36, 0.06), transparent 60%),
+    radial-gradient(900px 500px at 90% 110%, rgba(56, 189, 248, 0.04), transparent 65%),
+    linear-gradient(180deg, #0d0d10 0%, #08080a 100%);
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  min-height: 100%;
 }

@@ -98,7 +98,9 @@ export default function CampaignTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-white/10 bg-white/[0.03]">
+    <div className="relative overflow-hidden rounded-xl border border-white/[0.08] bg-gradient-to-b from-white/[0.06] via-white/[0.03] to-white/[0.015] shadow-[0_10px_28px_-14px_rgba(0,0,0,0.6),0_2px_6px_-2px_rgba(0,0,0,0.5)] ring-1 ring-inset ring-white/[0.06]">
+      <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
+      <div className="overflow-x-auto">
       <table className="w-full min-w-[920px] text-sm">
         <thead>
           <tr className="border-b border-white/10 text-neutral-400">
@@ -144,6 +146,7 @@ export default function CampaignTable({
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
