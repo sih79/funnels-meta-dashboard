@@ -22,7 +22,10 @@ export default async function AppLayout({
   if (isSupabaseConfigured()) {
     await requireUser();
     const profile = await getProfile();
-    isStaff = profile?.role === "admin" || profile?.role === "staff";
+    isStaff =
+      profile?.role === "admin" ||
+      profile?.role === "staff" ||
+      profile?.role === "super_admin";
   }
 
   return (
