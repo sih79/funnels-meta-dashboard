@@ -117,6 +117,8 @@ function buildTotals(daily: DailyMetric[]): Totals {
     convRate: clicks ? leads / clicks : 0,
     ctr: impressions ? clicks / impressions : 0,
     roas: spendUsd ? revenueUsd / spendUsd : 0,
+    conversionTotals: {},
+    costPerConversion: {},
   };
 }
 
@@ -132,5 +134,6 @@ export function getMockDashboard(): DashboardData {
     daily,
     campaigns: buildCampaigns(daily),
     totals: buildTotals(daily),
+    trackedConversions: [],
   };
 }

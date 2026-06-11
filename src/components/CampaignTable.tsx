@@ -1,31 +1,33 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { Campaign } from "@/lib/types";
+import type { Campaign, TrackedConversion } from "@/lib/types";
 import { gbp, num, pct, roasX } from "@/lib/format";
 
 type Row = Campaign & {
   cpc: number;
-  cpl: number;
   ctr: number;
-  convRate: number;
-  costPerSchedule: number;
   roas: number;
+  // conversion counts flattened into `conv:<actionType>` keys so the sort
+  // function can address them with a string key like the other columns.
+  [convKey: `conv:${string}`]: number;
 };
 
-type SortKey = keyof Row;
+type SortKey = keyof Row | string;
 
-const COLS: { key: SortKey; label: string; render: (r: Row) => string; num: boolean }[] = [
+interface Col {
+  key: SortKey;
+  label: string;
+  render: (r: Row) => string;
+  num: boolean;
+}
+
+const BASE_COLS: Col[] = [
   { key: "name", label: "Campaign", render: (r) => r.name, num: false },
   { key: "spendGbp", label: "Spend", render: (r) => gbp(r.spendGbp), num: true },
   { key: "clicks", label: "Clicks", render: (r) => num(r.clicks), num: true },
   { key: "ctr", label: "CTR", render: (r) => pct(r.ctr, 2), num: true },
   { key: "cpc", label: "CPC", render: (r) => gbp(r.cpc), num: true },
-  { key: "leads", label: "Leads", render: (r) => num(r.leads), num: true },
-  { key: "cpl", label: "CPL", render: (r) => gbp(r.cpl), num: true },
-  { key: "convRate", label: "Conv %", render: (r) => pct(r.convRate), num: true },
-  { key: "schedules", label: "Schedules", render: (r) => num(r.schedules), num: true },
-  { key: "costPerSchedule", label: "Cost/Sched", render: (r) => gbp(r.costPerSchedule), num: true },
   { key: "reach", label: "Reach", render: (r) => num(r.reach), num: true },
   { key: "roas", label: "ROAS", render: (r) => roasX(r.roas), num: true },
 ];
@@ -33,32 +35,52 @@ const COLS: { key: SortKey; label: string; render: (r: Row) => string; num: bool
 export default function CampaignTable({
   campaigns,
   fx,
+  trackedConversions,
 }: {
   campaigns: Campaign[];
   fx: number;
+  trackedConversions: TrackedConversion[];
 }) {
   const [sortKey, setSortKey] = useState<SortKey>("spendGbp");
   const [asc, setAsc] = useState(false);
 
+  const cols: Col[] = useMemo(() => {
+    const out: Col[] = [...BASE_COLS];
+    for (const tc of trackedConversions) {
+      const convKey = `conv:${tc.actionType}` as SortKey;
+      out.push({
+        key: convKey,
+        label: tc.displayName,
+        render: (r) => num((r as unknown as Record<string, number>)[convKey] ?? 0),
+        num: true,
+      });
+    }
+    return out;
+  }, [trackedConversions]);
+
   const rows: Row[] = useMemo(
     () =>
-      campaigns.map((c) => ({
-        ...c,
-        cpc: c.clicks ? c.spendGbp / c.clicks : 0,
-        cpl: c.leads ? c.spendGbp / c.leads : 0,
-        ctr: c.impressions ? c.clicks / c.impressions : 0,
-        convRate: c.clicks ? c.leads / c.clicks : 0,
-        costPerSchedule: c.schedules ? c.spendGbp / c.schedules : 0,
-        roas: c.spendGbp ? c.revenueUsd / (c.spendGbp * fx) : 0,
-      })),
-    [campaigns, fx]
+      campaigns.map((c) => {
+        const base: Row = {
+          ...c,
+          cpc: c.clicks ? c.spendGbp / c.clicks : 0,
+          ctr: c.impressions ? c.clicks / c.impressions : 0,
+          roas: c.spendGbp ? c.revenueUsd / (c.spendGbp * fx) : 0,
+        };
+        for (const tc of trackedConversions) {
+          (base as unknown as Record<string, number>)[`conv:${tc.actionType}`] =
+            c.conversions?.[tc.actionType] ?? 0;
+        }
+        return base;
+      }),
+    [campaigns, fx, trackedConversions],
   );
 
   const sorted = useMemo(() => {
     const copy = [...rows];
     copy.sort((a, b) => {
-      const av = a[sortKey];
-      const bv = b[sortKey];
+      const av = (a as unknown as Record<string, unknown>)[sortKey as string];
+      const bv = (b as unknown as Record<string, unknown>)[sortKey as string];
       if (typeof av === "number" && typeof bv === "number") return asc ? av - bv : bv - av;
       return asc
         ? String(av).localeCompare(String(bv))
@@ -80,9 +102,9 @@ export default function CampaignTable({
       <table className="w-full min-w-[920px] text-sm">
         <thead>
           <tr className="border-b border-white/10 text-neutral-400">
-            {COLS.map((col) => (
+            {cols.map((col) => (
               <th
-                key={col.key}
+                key={String(col.key)}
                 onClick={() => toggleSort(col.key)}
                 className={`cursor-pointer select-none whitespace-nowrap px-4 py-3 font-medium hover:text-amber-300 ${
                   col.num ? "text-right" : "text-left"
@@ -97,9 +119,9 @@ export default function CampaignTable({
         <tbody>
           {sorted.map((r) => (
             <tr key={r.id} className="border-b border-white/5 last:border-0 hover:bg-white/[0.02]">
-              {COLS.map((col) => (
+              {cols.map((col) => (
                 <td
-                  key={col.key}
+                  key={String(col.key)}
                   className={`whitespace-nowrap px-4 py-3 tabular-nums ${
                     col.num ? "text-right text-neutral-200" : "text-left"
                   }`}

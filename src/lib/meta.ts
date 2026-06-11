@@ -169,6 +169,8 @@ function buildTotals(daily: DailyMetric[], fx: number): Totals {
     convRate: acc.clicks ? acc.leads / acc.clicks : 0,
     ctr: acc.impressions ? acc.clicks / acc.impressions : 0,
     roas: spendUsd ? acc.revenueUsd / spendUsd : 0,
+    conversionTotals: {},
+    costPerConversion: {},
   };
 }
 
@@ -311,6 +313,143 @@ export async function fetchCampaignRows(
     }));
 }
 
+// ---- Per-action_type conversion breakdowns -------------------------------
+// These return ONE row per (date, action_type) [or (date, campaign_id,
+// action_type)] so the sync layer can persist a complete breakdown without
+// pre-committing to which conversions to surface. The admin's
+// tracked_conversions picker decides which ones the dashboard renders.
+
+export interface NormalizedConversionRow {
+  date: string;
+  actionType: string;
+  count: number;
+  value: number;
+}
+
+export interface NormalizedCampaignConversionRow extends NormalizedConversionRow {
+  campaign_id: string;
+}
+
+function explodeConversionRow(
+  r: MetaInsightRow,
+  date: string,
+): NormalizedConversionRow[] {
+  const out = new Map<string, NormalizedConversionRow>();
+  for (const a of r.actions ?? []) {
+    if (!a.action_type) continue;
+    const existing = out.get(a.action_type) ?? { date, actionType: a.action_type, count: 0, value: 0 };
+    existing.count += Number(a.value || 0);
+    out.set(a.action_type, existing);
+  }
+  for (const a of r.action_values ?? []) {
+    if (!a.action_type) continue;
+    const existing = out.get(a.action_type) ?? { date, actionType: a.action_type, count: 0, value: 0 };
+    existing.value += Number(a.value || 0);
+    out.set(a.action_type, existing);
+  }
+  return Array.from(out.values());
+}
+
+/**
+ * Account-level per-(date, action_type) breakdown over a date range.
+ * One row per (date, action_type) across both actions[] and action_values[].
+ */
+export async function fetchAccountConversionDailyRows(
+  cfg: MetaConfig,
+  range: DateRange,
+): Promise<NormalizedConversionRow[]> {
+  const fields = "actions,action_values";
+  const auth = `access_token=${encodeURIComponent(cfg.token)}`;
+  const url =
+    `${GRAPH}/${cfg.accountId}/insights` +
+    `?level=account&time_increment=1&${timeRangeParam(range)}` +
+    `&fields=${fields}&limit=500&${auth}`;
+
+  const rows = await fetchAllRows(url);
+  const out: NormalizedConversionRow[] = [];
+  for (const r of rows) {
+    if (!r.date_start) continue;
+    out.push(...explodeConversionRow(r, r.date_start));
+  }
+  return out;
+}
+
+/**
+ * Per-campaign per-(date, action_type) breakdown over a date range.
+ */
+export async function fetchCampaignConversionRows(
+  cfg: MetaConfig,
+  range: DateRange,
+): Promise<NormalizedCampaignConversionRow[]> {
+  const fields = "actions,action_values";
+  const auth = `access_token=${encodeURIComponent(cfg.token)}`;
+  const url =
+    `${GRAPH}/${cfg.accountId}/insights` +
+    `?level=campaign&time_increment=1&${timeRangeParam(range)}` +
+    `&fields=campaign_id,${fields}&limit=500&${auth}`;
+
+  const rows = await fetchAllRows(url);
+  const out: NormalizedCampaignConversionRow[] = [];
+  for (const r of rows) {
+    if (!r.date_start || !r.campaign_id) continue;
+    for (const c of explodeConversionRow(r, r.date_start)) {
+      out.push({ ...c, campaign_id: r.campaign_id });
+    }
+  }
+  return out;
+}
+
+export interface MetaCustomConversion {
+  id: string;
+  name: string;
+  custom_event_type: string | null;
+}
+
+interface MetaCustomConversionApiRow {
+  id?: string;
+  name?: string;
+  custom_event_type?: string | null;
+}
+
+/**
+ * List Meta Custom Conversions defined for the ad account. Used by the sync
+ * to auto-discover named conversions and seed tracked_conversions entries.
+ */
+export async function fetchCustomConversions(
+  cfg: MetaConfig,
+): Promise<MetaCustomConversion[]> {
+  const auth = `access_token=${encodeURIComponent(cfg.token)}`;
+  const url =
+    `${GRAPH}/${cfg.accountId}/customconversions` +
+    `?fields=id,name,custom_event_type,event_source_type&limit=200&${auth}`;
+
+  const out: MetaCustomConversion[] = [];
+  let next: string | null = url;
+  while (next) {
+    const res: Response = await fetch(next, { cache: "no-store" });
+    const json: {
+      data?: MetaCustomConversionApiRow[];
+      paging?: { next?: string };
+      error?: { message?: string };
+    } = await res.json();
+    if (!res.ok) {
+      // Don't blow up the whole sync if customconversions isn't available
+      // (some tokens lack ads_read on this edge). Just return what we have.
+      return out;
+    }
+    for (const r of json.data ?? []) {
+      if (!r.id || !r.name) continue;
+      out.push({
+        id: r.id,
+        name: r.name,
+        custom_event_type: r.custom_event_type ?? null,
+      });
+    }
+    next = json.paging?.next ?? null;
+  }
+  return out;
+}
+
 export async function fetchMetaDashboard(cfg: MetaConfig): Promise<DashboardData> {
   const fields = "spend,clicks,impressions,reach,actions,action_values";
   const base = `${GRAPH}/${cfg.accountId}/insights`;
@@ -338,5 +477,6 @@ export async function fetchMetaDashboard(cfg: MetaConfig): Promise<DashboardData
     daily,
     campaigns: mapCampaigns(campaignRows, cfg, statuses),
     totals: buildTotals(daily, cfg.fxGbpToUsd),
+    trackedConversions: [],
   };
 }

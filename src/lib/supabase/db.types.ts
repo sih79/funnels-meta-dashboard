@@ -86,6 +86,40 @@ export interface MetaConnectionRow {
   created_at: string;
 }
 
+export interface TrackedConversionRow {
+  id: string; // uuid
+  ad_account_id: string; // uuid
+  action_type: string;
+  display_name: string;
+  is_enabled: boolean;
+  display_order: number;
+  custom_conversion_id: string | null;
+  meta_name: string | null;
+  first_seen_at: string; // timestamptz
+  updated_at: string; // timestamptz
+}
+
+export interface ConversionMetricsDailyRow {
+  id: string; // uuid
+  ad_account_id: string; // uuid
+  action_type: string;
+  date: string; // date
+  count: number;
+  value: number;
+  updated_at: string; // timestamptz
+}
+
+export interface ConversionMetricsCampaignDailyRow {
+  id: string; // uuid
+  ad_account_id: string; // uuid
+  campaign_id: string;
+  action_type: string;
+  date: string; // date
+  count: number;
+  value: number;
+  updated_at: string; // timestamptz
+}
+
 export interface SyncLogRow {
   id: string;
   ad_account_id: string;
@@ -117,6 +151,9 @@ export interface Database {
       meta_connections: TableShape<MetaConnectionRow>;
       sync_log: TableShape<SyncLogRow>;
       business_managers: TableShape<BusinessManagerRow>;
+      tracked_conversions: TableShape<TrackedConversionRow>;
+      conversion_metrics_daily: TableShape<ConversionMetricsDailyRow>;
+      conversion_metrics_campaign_daily: TableShape<ConversionMetricsCampaignDailyRow>;
     };
     Views: Record<never, never>;
     Functions: {

@@ -14,12 +14,19 @@ import type {
   SyncLogRow,
   MetricsDailyRow,
   CampaignMetricsDailyRow,
+  ConversionMetricsDailyRow,
+  ConversionMetricsCampaignDailyRow,
+  TrackedConversionRow,
 } from "./supabase/db.types";
 import {
   buildMetaConfig,
   fetchAccountDailyRows,
   fetchCampaignRows,
+  fetchAccountConversionDailyRows,
+  fetchCampaignConversionRows,
+  fetchCustomConversions,
   type DateRange,
+  type MetaCustomConversion,
 } from "./meta";
 
 // How many days back each kind of run pulls.
@@ -66,6 +73,12 @@ function lastNDaysRange(days: number): DateRange {
 // boundary, keeping every call site fully type-checked.
 type MetricsDailyInsert = Omit<MetricsDailyRow, "id">;
 type CampaignMetricsDailyInsert = Omit<CampaignMetricsDailyRow, "id">;
+type ConversionMetricsDailyInsert = Omit<ConversionMetricsDailyRow, "id">;
+type ConversionMetricsCampaignDailyInsert = Omit<ConversionMetricsCampaignDailyRow, "id">;
+type TrackedConversionInsert = Omit<TrackedConversionRow, "id" | "first_seen_at" | "updated_at"> & {
+  first_seen_at?: string;
+  updated_at?: string;
+};
 type SyncLogInsert = Omit<SyncLogRow, "id" | "finished_at" | "error"> & {
   finished_at?: string | null;
   error?: string | null;
@@ -83,8 +96,26 @@ async function upsertChunked(
   onConflict: string,
 ): Promise<void>;
 async function upsertChunked(
-  table: "metrics_daily" | "campaign_metrics_daily",
-  rows: MetricsDailyInsert[] | CampaignMetricsDailyInsert[],
+  table: "conversion_metrics_daily",
+  rows: ConversionMetricsDailyInsert[],
+  onConflict: string,
+): Promise<void>;
+async function upsertChunked(
+  table: "conversion_metrics_campaign_daily",
+  rows: ConversionMetricsCampaignDailyInsert[],
+  onConflict: string,
+): Promise<void>;
+async function upsertChunked(
+  table:
+    | "metrics_daily"
+    | "campaign_metrics_daily"
+    | "conversion_metrics_daily"
+    | "conversion_metrics_campaign_daily",
+  rows:
+    | MetricsDailyInsert[]
+    | CampaignMetricsDailyInsert[]
+    | ConversionMetricsDailyInsert[]
+    | ConversionMetricsCampaignDailyInsert[],
   onConflict: string,
 ): Promise<void> {
   if (rows.length === 0) return;
@@ -180,6 +211,119 @@ async function resolveToken(
   return { skip: "No Meta token for this BM" };
 }
 
+// Friendly default for the display_name shown in the picker / KPI tile.
+// Strips the common Meta prefixes and title-cases the remainder.
+function friendlyDisplayName(actionType: string): string {
+  const stripped = actionType
+    .replace(/^offsite_conversion\./, "")
+    .replace(/^onsite_conversion\./, "")
+    .replace(/^omni_/, "")
+    .replace(/^fb_pixel_/, "")
+    .replace(/^custom\./, "")
+    .replace(/_/g, " ")
+    .trim();
+  if (!stripped) return actionType;
+  return stripped.replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+/**
+ * Discover-or-preserve tracked_conversions rows.
+ *
+ * For each distinct action_type we saw in this sync (plus every custom
+ * conversion the account exposes), upsert a tracked_conversions row keyed by
+ * (ad_account_id, action_type). ON CONFLICT we ONLY refresh `meta_name`,
+ * `custom_conversion_id` and `updated_at` — `is_enabled`, `display_name` and
+ * `display_order` are NEVER overwritten so the admin's picker choices stay put.
+ */
+async function discoverTrackedConversions(
+  adAccountId: string,
+  actionTypes: Set<string>,
+  customConversions: MetaCustomConversion[],
+): Promise<number> {
+  if (actionTypes.size === 0 && customConversions.length === 0) return 0;
+
+  const admin = createAdminClient();
+  const now = new Date().toISOString();
+
+  // Map custom_conversion_id (numeric Meta id) → MetaCustomConversion.
+  // Their action_type in insights looks like "offsite_conversion.custom.<id>".
+  const customById = new Map<string, MetaCustomConversion>();
+  for (const c of customConversions) customById.set(c.id, c);
+  const customActionType = (id: string) => `offsite_conversion.custom.${id}`;
+
+  // 1. Existing rows for this account so we don't trample admin picks.
+  const { data: existingRows } = await admin
+    .from("tracked_conversions")
+    .select("action_type")
+    .eq("ad_account_id", adAccountId);
+  const existing = new Set(
+    ((existingRows as Pick<TrackedConversionRow, "action_type">[] | null) ?? []).map(
+      (r) => r.action_type,
+    ),
+  );
+
+  const inserts: TrackedConversionInsert[] = [];
+
+  // From insights breakdown.
+  for (const at of actionTypes) {
+    if (existing.has(at)) continue;
+    // If this is a known custom conversion, prefer its Meta name.
+    let displayName = friendlyDisplayName(at);
+    let customConversionId: string | null = null;
+    let metaName: string | null = null;
+    const m = /^offsite_conversion\.custom\.(\d+)$/.exec(at);
+    if (m && customById.has(m[1])) {
+      const cc = customById.get(m[1])!;
+      displayName = cc.name;
+      customConversionId = cc.id;
+      metaName = cc.name;
+    }
+    inserts.push({
+      ad_account_id: adAccountId,
+      action_type: at,
+      display_name: displayName,
+      is_enabled: false,
+      display_order: 0,
+      custom_conversion_id: customConversionId,
+      meta_name: metaName,
+      first_seen_at: now,
+      updated_at: now,
+    });
+  }
+
+  // From customconversions edge (may include zero-traffic conversions
+  // that never show up in insights yet — still worth surfacing in the picker).
+  for (const cc of customConversions) {
+    const at = customActionType(cc.id);
+    if (existing.has(at) || actionTypes.has(at)) continue;
+    inserts.push({
+      ad_account_id: adAccountId,
+      action_type: at,
+      display_name: cc.name,
+      is_enabled: false,
+      display_order: 0,
+      custom_conversion_id: cc.id,
+      meta_name: cc.name,
+      first_seen_at: now,
+      updated_at: now,
+    });
+  }
+
+  if (inserts.length === 0) return 0;
+
+  // Insert with ON CONFLICT DO NOTHING so concurrent syncs and existing
+  // admin choices stay safe. supabase-js upsert with ignoreDuplicates=true.
+  const { error } = await admin
+    .from("tracked_conversions")
+    .upsert(inserts as never, {
+      onConflict: "ad_account_id,action_type",
+      ignoreDuplicates: true,
+    });
+  if (error) throw new Error(`tracked_conversions upsert failed: ${error.message}`);
+
+  return inserts.length;
+}
+
 /**
  * Sync ONE ad account: fetch the last `days` of daily + per-campaign rows from
  * Meta, upsert into the cache, and write a sync_log row. Never throws — always
@@ -228,9 +372,18 @@ export async function syncAdAccount(
     });
     const range = lastNDaysRange(days);
 
-    const [dailyRows, campaignRows] = await Promise.all([
+    const [
+      dailyRows,
+      campaignRows,
+      conversionDailyRows,
+      conversionCampaignRows,
+      customConversions,
+    ] = await Promise.all([
       fetchAccountDailyRows(cfg, range),
       fetchCampaignRows(cfg, range),
+      fetchAccountConversionDailyRows(cfg, range),
+      fetchCampaignConversionRows(cfg, range),
+      fetchCustomConversions(cfg).catch(() => [] as MetaCustomConversion[]),
     ]);
 
     const now = new Date().toISOString();
@@ -264,14 +417,61 @@ export async function syncAdAccount(
       updated_at: now,
     }));
 
+    const conversionUpserts: ConversionMetricsDailyInsert[] = conversionDailyRows.map(
+      (r) => ({
+        ad_account_id: account.id,
+        action_type: r.actionType,
+        date: r.date,
+        count: r.count,
+        value: r.value,
+        updated_at: now,
+      }),
+    );
+
+    const conversionCampaignUpserts: ConversionMetricsCampaignDailyInsert[] =
+      conversionCampaignRows.map((r) => ({
+        ad_account_id: account.id,
+        campaign_id: r.campaign_id,
+        action_type: r.actionType,
+        date: r.date,
+        count: r.count,
+        value: r.value,
+        updated_at: now,
+      }));
+
     await upsertChunked("metrics_daily", dailyUpserts, "ad_account_id,date");
     await upsertChunked(
       "campaign_metrics_daily",
       campaignUpserts,
       "ad_account_id,campaign_id,date",
     );
+    await upsertChunked(
+      "conversion_metrics_daily",
+      conversionUpserts,
+      "ad_account_id,action_type,date",
+    );
+    await upsertChunked(
+      "conversion_metrics_campaign_daily",
+      conversionCampaignUpserts,
+      "ad_account_id,campaign_id,action_type,date",
+    );
 
-    const rowsWritten = dailyUpserts.length + campaignUpserts.length;
+    // Auto-discover any new action_types into tracked_conversions. Admin's
+    // is_enabled / display_name picks are preserved on conflict.
+    const discoveredTypes = new Set<string>();
+    for (const r of conversionDailyRows) discoveredTypes.add(r.actionType);
+    const trackedInserted = await discoverTrackedConversions(
+      account.id,
+      discoveredTypes,
+      customConversions,
+    );
+
+    const rowsWritten =
+      dailyUpserts.length +
+      campaignUpserts.length +
+      conversionUpserts.length +
+      conversionCampaignUpserts.length +
+      trackedInserted;
     const finishedAt = new Date().toISOString();
 
     if (logId) {

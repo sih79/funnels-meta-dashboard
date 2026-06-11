@@ -7,6 +7,13 @@ import "server-only";
 // presentational components already expect. The sync robot (Phase 3) keeps the
 // cache fresh; this layer just reads + aggregates it.
 //
+// Conversions: rather than fixed leads/schedules KPIs, the dashboard renders
+// whichever tracked_conversions the admin has enabled for the client's ad
+// accounts. We aggregate from conversion_metrics_daily for ENABLED conversions
+// only. The legacy leads/schedules columns on DailyMetric stay populated as
+// 0 for back-compat — components that still reference them get a zero,
+// components that use `conversions` get real data.
+//
 // Access control: every read goes through the user's own server client, so RLS
 // automatically filters to rows the user may see (staff: all; client: own
 // client_id). We ALSO scope queries explicitly (by client_id / ad_account_id)
@@ -20,8 +27,17 @@ import type {
   ClientRow,
   MetricsDailyRow,
   CampaignMetricsDailyRow,
+  ConversionMetricsDailyRow,
+  ConversionMetricsCampaignDailyRow,
+  TrackedConversionRow,
 } from "@/lib/supabase/db.types";
-import type { Campaign, DailyMetric, DashboardData, Totals } from "@/lib/types";
+import type {
+  Campaign,
+  DailyMetric,
+  DashboardData,
+  Totals,
+  TrackedConversion,
+} from "@/lib/types";
 
 // Same default the demo / meta layer use. The DB stores raw account-currency
 // spend/revenue; we treat spend as "spendGbp" and revenue as USD-after-FX so
@@ -89,19 +105,32 @@ export async function getAccessibleClientBySlug(
   return clients.find((c) => c.slug === slug) ?? null;
 }
 
-function sum<T>(arr: T[], pick: (t: T) => number): number {
-  return arr.reduce((acc, t) => acc + pick(t), 0);
-}
-
-function buildTotals(daily: DailyMetric[], fx: number): Totals {
-  const spendGbp = sum(daily, (d) => d.spendGbp);
-  const clicks = sum(daily, (d) => d.clicks);
-  const leads = sum(daily, (d) => d.leads);
-  const schedules = sum(daily, (d) => d.schedules);
-  const reach = sum(daily, (d) => d.reach);
-  const impressions = sum(daily, (d) => d.impressions);
-  const revenueUsd = sum(daily, (d) => d.revenueUsd);
+function buildTotals(
+  daily: DailyMetric[],
+  fx: number,
+  trackedActionTypes: string[],
+): Totals {
+  const spendGbp = daily.reduce((s, d) => s + d.spendGbp, 0);
+  const clicks = daily.reduce((s, d) => s + d.clicks, 0);
+  const leads = daily.reduce((s, d) => s + d.leads, 0);
+  const schedules = daily.reduce((s, d) => s + d.schedules, 0);
+  const reach = daily.reduce((s, d) => s + d.reach, 0);
+  const impressions = daily.reduce((s, d) => s + d.impressions, 0);
+  const revenueUsd = daily.reduce((s, d) => s + d.revenueUsd, 0);
   const spendUsd = spendGbp * fx;
+
+  const conversionTotals: Record<string, number> = {};
+  for (const at of trackedActionTypes) conversionTotals[at] = 0;
+  for (const d of daily) {
+    if (!d.conversions) continue;
+    for (const [at, c] of Object.entries(d.conversions)) {
+      conversionTotals[at] = (conversionTotals[at] ?? 0) + c;
+    }
+  }
+  const costPerConversion: Record<string, number> = {};
+  for (const [at, c] of Object.entries(conversionTotals)) {
+    costPerConversion[at] = c ? spendGbp / c : 0;
+  }
 
   return {
     spendGbp,
@@ -118,11 +147,13 @@ function buildTotals(daily: DailyMetric[], fx: number): Totals {
     convRate: clicks ? leads / clicks : 0,
     ctr: impressions ? clicks / impressions : 0,
     roas: spendUsd ? revenueUsd / spendUsd : 0,
+    conversionTotals,
+    costPerConversion,
   };
 }
 
 function emptyTotals(): Totals {
-  return buildTotals([], FX_GBP_TO_USD);
+  return buildTotals([], FX_GBP_TO_USD, []);
 }
 
 /**
@@ -166,11 +197,53 @@ export async function getClientDashboard(
       daily: [],
       campaigns: [],
       totals: emptyTotals(),
+      trackedConversions: [],
     };
   }
 
+  // The admin-enabled tracked conversions for these accounts, ordered.
+  const { data: trackedRows } = await supabase
+    .from("tracked_conversions")
+    .select("action_type, display_name, display_order")
+    .in("ad_account_id", accountIds)
+    .eq("is_enabled", true)
+    .order("display_order", { ascending: true });
+
+  // Collapse duplicates across multiple ad accounts — last write wins for
+  // display_name, lowest display_order wins.
+  const trackedMap = new Map<string, TrackedConversion>();
+  for (const r of (trackedRows as Pick<
+    TrackedConversionRow,
+    "action_type" | "display_name" | "display_order"
+  >[] | null) ?? []) {
+    const existing = trackedMap.get(r.action_type);
+    if (!existing) {
+      trackedMap.set(r.action_type, {
+        actionType: r.action_type,
+        displayName: r.display_name,
+        displayOrder: r.display_order,
+      });
+    } else if (r.display_order < existing.displayOrder) {
+      trackedMap.set(r.action_type, {
+        actionType: r.action_type,
+        displayName: r.display_name,
+        displayOrder: r.display_order,
+      });
+    }
+  }
+  const trackedConversions = Array.from(trackedMap.values()).sort(
+    (a, b) =>
+      a.displayOrder - b.displayOrder || a.displayName.localeCompare(b.displayName),
+  );
+  const enabledActionTypes = trackedConversions.map((t) => t.actionType);
+
   // Pull daily + per-campaign rows for the window across all the accounts.
-  const [{ data: metricRows }, { data: campaignRows }] = await Promise.all([
+  const [
+    { data: metricRows },
+    { data: campaignRows },
+    { data: conversionDailyRows },
+    { data: conversionCampaignRows },
+  ] = await Promise.all([
     supabase
       .from("metrics_daily")
       .select("date, spend, clicks, impressions, reach, leads, schedules, revenue")
@@ -186,14 +259,37 @@ export async function getClientDashboard(
       .in("ad_account_id", accountIds)
       .gte("date", range.since)
       .lte("date", range.until),
+    enabledActionTypes.length > 0
+      ? supabase
+          .from("conversion_metrics_daily")
+          .select("date, action_type, count")
+          .in("ad_account_id", accountIds)
+          .in("action_type", enabledActionTypes)
+          .gte("date", range.since)
+          .lte("date", range.until)
+      : Promise.resolve({ data: [] as Partial<ConversionMetricsDailyRow>[] }),
+    enabledActionTypes.length > 0
+      ? supabase
+          .from("conversion_metrics_campaign_daily")
+          .select("campaign_id, action_type, count")
+          .in("ad_account_id", accountIds)
+          .in("action_type", enabledActionTypes)
+          .gte("date", range.since)
+          .lte("date", range.until)
+      : Promise.resolve({ data: [] as Partial<ConversionMetricsCampaignDailyRow>[] }),
   ]);
 
   const daily = aggregateDaily(
     (metricRows as Partial<MetricsDailyRow>[] | null) ?? [],
+    (conversionDailyRows as Partial<ConversionMetricsDailyRow>[] | null) ?? [],
+    enabledActionTypes,
     fx,
   );
   const campaigns = aggregateCampaigns(
     (campaignRows as Partial<CampaignMetricsDailyRow>[] | null) ?? [],
+    (conversionCampaignRows as Partial<ConversionMetricsCampaignDailyRow>[] | null) ??
+      [],
+    enabledActionTypes,
     fx,
   );
 
@@ -204,14 +300,26 @@ export async function getClientDashboard(
     rangeEnd: daily.length ? daily[daily.length - 1].date : range.until,
     daily,
     campaigns,
-    totals: buildTotals(daily, fx),
+    totals: buildTotals(daily, fx, enabledActionTypes),
+    trackedConversions,
   };
 }
 
 // Collapse per-account daily rows into one row per date (summing across the
 // client's accounts), sorted oldest → newest like the demo data.
-function aggregateDaily(rows: Partial<MetricsDailyRow>[], fx: number): DailyMetric[] {
+function aggregateDaily(
+  rows: Partial<MetricsDailyRow>[],
+  conversionRows: Partial<ConversionMetricsDailyRow>[],
+  enabledActionTypes: string[],
+  fx: number,
+): DailyMetric[] {
   const byDate = new Map<string, DailyMetric>();
+
+  const blankConversions = (): Record<string, number> => {
+    const m: Record<string, number> = {};
+    for (const at of enabledActionTypes) m[at] = 0;
+    return m;
+  };
 
   for (const r of rows) {
     const date = String(r.date);
@@ -228,17 +336,45 @@ function aggregateDaily(rows: Partial<MetricsDailyRow>[], fx: number): DailyMetr
         reach: 0,
         impressions: 0,
         revenueUsd: 0,
+        conversions: blankConversions(),
       } satisfies DailyMetric);
 
     existing.spendGbp += n(r.spend);
     existing.clicks += n(r.clicks);
-    existing.leads += n(r.leads);
-    existing.schedules += n(r.schedules);
+    // leads/schedules legacy fields retained at 0 — the new pipeline uses
+    // conversions[actionType] instead.
     existing.reach += n(r.reach);
     existing.impressions += n(r.impressions);
     existing.revenueUsd += n(r.revenue) * fx; // raw revenue → USD-after-FX
 
     byDate.set(date, existing);
+  }
+
+  // Layer conversion counts onto whichever date buckets exist; create buckets
+  // for dates that have conversions but no spend row (rare, but possible).
+  for (const cr of conversionRows) {
+    const date = String(cr.date);
+    if (!date || date === "undefined") continue;
+    const actionType = String(cr.action_type ?? "");
+    if (!actionType) continue;
+
+    let bucket = byDate.get(date);
+    if (!bucket) {
+      bucket = {
+        date,
+        spendGbp: 0,
+        clicks: 0,
+        leads: 0,
+        schedules: 0,
+        reach: 0,
+        impressions: 0,
+        revenueUsd: 0,
+        conversions: blankConversions(),
+      };
+      byDate.set(date, bucket);
+    }
+    if (!bucket.conversions) bucket.conversions = blankConversions();
+    bucket.conversions[actionType] = (bucket.conversions[actionType] ?? 0) + n(cr.count);
   }
 
   return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
@@ -248,10 +384,18 @@ function aggregateDaily(rows: Partial<MetricsDailyRow>[], fx: number): DailyMetr
 // range). Status is "Active" unless every row for that campaign is paused.
 function aggregateCampaigns(
   rows: Partial<CampaignMetricsDailyRow>[],
+  conversionRows: Partial<ConversionMetricsCampaignDailyRow>[],
+  enabledActionTypes: string[],
   fx: number,
 ): Campaign[] {
   type Acc = Campaign & { _anyActive: boolean };
   const byCampaign = new Map<string, Acc>();
+
+  const blankConversions = (): Record<string, number> => {
+    const m: Record<string, number> = {};
+    for (const at of enabledActionTypes) m[at] = 0;
+    return m;
+  };
 
   for (const r of rows) {
     const id = String(r.campaign_id ?? "");
@@ -270,19 +414,46 @@ function aggregateCampaigns(
         reach: 0,
         impressions: 0,
         revenueUsd: 0,
+        conversions: blankConversions(),
         _anyActive: false,
       } as Acc);
 
     existing.spendGbp += n(r.spend);
     existing.clicks += n(r.clicks);
-    existing.leads += n(r.leads);
-    existing.schedules += n(r.schedules);
     existing.reach += n(r.reach);
     existing.impressions += n(r.impressions);
     existing.revenueUsd += n(r.revenue) * fx;
     if ((r.status ?? "").toLowerCase() === "active") existing._anyActive = true;
 
     byCampaign.set(id, existing);
+  }
+
+  for (const cr of conversionRows) {
+    const id = String(cr.campaign_id ?? "");
+    if (!id || id === "undefined") continue;
+    const actionType = String(cr.action_type ?? "");
+    if (!actionType) continue;
+
+    let bucket = byCampaign.get(id);
+    if (!bucket) {
+      bucket = {
+        id,
+        name: id,
+        status: "Paused",
+        spendGbp: 0,
+        clicks: 0,
+        leads: 0,
+        schedules: 0,
+        reach: 0,
+        impressions: 0,
+        revenueUsd: 0,
+        conversions: blankConversions(),
+        _anyActive: false,
+      } as Acc;
+      byCampaign.set(id, bucket);
+    }
+    if (!bucket.conversions) bucket.conversions = blankConversions();
+    bucket.conversions[actionType] = (bucket.conversions[actionType] ?? 0) + n(cr.count);
   }
 
   return Array.from(byCampaign.values())

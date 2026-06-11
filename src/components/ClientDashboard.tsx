@@ -2,6 +2,11 @@
 // + the resolved range and renders the full dashboard (header, KPIs, charts,
 // campaign table, daily table). This is the refactored, data-as-props version
 // of what /demo renders, so all clients share one layout.
+//
+// KPIs are dynamic per ad account: Spend / ROAS / CTR / CPC are fixed, then
+// ONE tile per admin-enabled tracked conversion (showing total count + cost
+// per conversion). If no conversions are enabled, fall back to the legacy
+// Reach + CTR pair so the dashboard stays balanced.
 
 import KpiCard from "@/components/KpiCard";
 import CampaignTable from "@/components/CampaignTable";
@@ -11,6 +16,9 @@ import DateRangePicker from "@/components/DateRangePicker";
 import { gbp, num, pct, roasX, shortDate, usd } from "@/lib/format";
 import type { DashboardData } from "@/lib/types";
 import type { ResolvedRange } from "@/lib/dateRange";
+
+// Cap the number of conversion KPIs we render up front so the grid stays sane.
+const MAX_CONVERSION_KPIS = 6;
 
 export default function ClientDashboard({
   data,
@@ -24,6 +32,8 @@ export default function ClientDashboard({
   const t = data.totals;
   const isLive = data.source === "live";
   const hasData = data.daily.length > 0;
+  const tracked = data.trackedConversions.slice(0, MAX_CONVERSION_KPIS);
+  const firstTrackedActionType = tracked[0]?.actionType ?? null;
 
   return (
     <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -71,21 +81,54 @@ export default function ClientDashboard({
               sub={`${usd(t.revenueUsd)} revenue`}
               accent
             />
-            <KpiCard label="Total Leads" value={num(t.leads)} sub={`${num(t.schedules)} schedules`} />
-            <KpiCard label="Cost / Lead" value={gbp(t.cpl)} sub={`CPC ${gbp(t.cpc)}`} />
-            <KpiCard label="Reach" value={num(t.reach)} sub={`${num(t.impressions)} impressions`} />
-            <KpiCard label="CTR" value={pct(t.ctr, 2)} sub={`Conv ${pct(t.convRate)}`} />
+            <KpiCard label="CTR" value={pct(t.ctr, 2)} sub={`${num(t.clicks)} clicks`} />
+            <KpiCard label="CPC" value={gbp(t.cpc)} sub={`${num(t.impressions)} impressions`} />
+            {tracked.length === 0 ? (
+              <>
+                <KpiCard
+                  label="Reach"
+                  value={num(t.reach)}
+                  sub="No conversions enabled"
+                />
+                <KpiCard
+                  label="Conversions"
+                  value="—"
+                  sub="Enable in admin → conversions"
+                />
+              </>
+            ) : (
+              tracked.map((tc) => {
+                const count = t.conversionTotals[tc.actionType] ?? 0;
+                const cost = t.costPerConversion[tc.actionType] ?? 0;
+                return (
+                  <KpiCard
+                    key={tc.actionType}
+                    label={tc.displayName}
+                    value={num(count)}
+                    sub={`cost ${count ? gbp(cost) : "—"}`}
+                  />
+                );
+              })
+            )}
           </section>
 
           <section className="mt-6 grid gap-4 lg:grid-cols-2">
             <SpendRoasChart daily={data.daily} fx={data.fxGbpToUsd} />
-            <LeadsCplChart daily={data.daily} />
+            <LeadsCplChart
+              daily={data.daily}
+              actionType={firstTrackedActionType}
+              displayName={tracked[0]?.displayName ?? "Leads"}
+            />
           </section>
 
           {data.campaigns.length > 0 && (
             <section className="mt-8">
               <h2 className="mb-3 text-lg font-semibold text-white">Campaign breakdown</h2>
-              <CampaignTable campaigns={data.campaigns} fx={data.fxGbpToUsd} />
+              <CampaignTable
+                campaigns={data.campaigns}
+                fx={data.fxGbpToUsd}
+                trackedConversions={data.trackedConversions}
+              />
             </section>
           )}
 
@@ -94,7 +137,11 @@ export default function ClientDashboard({
             <p className="mb-3 text-sm text-neutral-500">
               Mirrors the Ads Tracking Sheet, one day per row (newest first).
             </p>
-            <DailyTable daily={data.daily} fx={data.fxGbpToUsd} />
+            <DailyTable
+              daily={data.daily}
+              fx={data.fxGbpToUsd}
+              trackedConversions={data.trackedConversions}
+            />
           </section>
         </>
       )}
@@ -105,7 +152,7 @@ export default function ClientDashboard({
 function EmptyState() {
   return (
     <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-6 py-16 text-center">
-      <p className="text-3xl">🤖</p>
+      <p className="text-3xl">No data</p>
       <h2 className="mt-3 text-lg font-semibold text-white">No data yet</h2>
       <p className="mx-auto mt-2 max-w-md text-sm text-neutral-400">
         The sync robot will fill this in on its next run, or an admin can trigger

@@ -2,10 +2,11 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireStaff } from "@/lib/auth";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
-import { getAdminClientDetail } from "@/lib/admin/data";
+import { getAdminClientDetail, getTrackedConversionsForAccount } from "@/lib/admin/data";
 import AddAdAccountForm from "@/components/admin/AddAdAccountForm";
 import BackfillButton from "@/components/admin/BackfillButton";
 import InviteLoginForm from "@/components/admin/InviteLoginForm";
+import ConversionPickerRow from "@/components/admin/ConversionPickerRow";
 
 // Manage one client: its ad accounts (+ last sync), client logins, and the
 // forms to add more. Staff-only. params is a Promise in Next 16 — await it.
@@ -36,6 +37,17 @@ export default async function ManageClientPage({
   if (!detail) notFound();
 
   const { client, adAccounts, logins } = detail;
+
+  // Load tracked conversions for every ad account in parallel so the picker
+  // shows up inline with each account.
+  const conversionsByAccount = new Map(
+    await Promise.all(
+      adAccounts.map(
+        async (a) =>
+          [a.id, await getTrackedConversionsForAccount(a.id)] as const,
+      ),
+    ),
+  );
 
   return (
     <main className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
@@ -95,6 +107,42 @@ export default async function ManageClientPage({
                     <BackfillButton adAccountId={a.id} slug={client.slug} />
                   </div>
                 )}
+
+                {/* Conversion picker — admin chooses which Meta action_types
+                    surface in this account's dashboard KPIs + tables. */}
+                <div className="mt-4 border-t border-white/5 pt-4">
+                  <h4 className="mb-3 text-sm font-semibold uppercase tracking-wider text-amber-400">
+                    Conversions
+                  </h4>
+                  {(() => {
+                    const conversions = conversionsByAccount.get(a.id) ?? [];
+                    if (conversions.length === 0) {
+                      return (
+                        <p className="rounded-lg border border-white/10 bg-neutral-900/40 p-3 text-sm text-neutral-400">
+                          No conversions discovered yet. Run a backfill or wait
+                          for the next sync — every Meta action_type and Custom
+                          Conversion will appear here automatically.
+                        </p>
+                      );
+                    }
+                    return (
+                      <div className="space-y-3">
+                        {conversions.map((c) => (
+                          <ConversionPickerRow
+                            key={c.id}
+                            id={c.id}
+                            actionType={c.actionType}
+                            metaName={c.metaName}
+                            displayName={c.displayName}
+                            isEnabled={c.isEnabled}
+                            displayOrder={c.displayOrder}
+                            slug={client.slug}
+                          />
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
               </li>
             ))}
           </ul>

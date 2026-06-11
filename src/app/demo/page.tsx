@@ -63,7 +63,11 @@ export default async function Home() {
 
       <section className="mt-8">
         <h2 className="mb-3 text-lg font-semibold text-white">Campaign breakdown</h2>
-        <CampaignTable campaigns={data.campaigns} fx={data.fxGbpToUsd} />
+        <CampaignTable
+          campaigns={data.campaigns}
+          fx={data.fxGbpToUsd}
+          trackedConversions={data.trackedConversions}
+        />
       </section>
 
       <section className="mt-8">
@@ -71,7 +75,11 @@ export default async function Home() {
         <p className="mb-3 text-sm text-neutral-500">
           Mirrors the Ads Tracking Sheet, one day per row (newest first).
         </p>
-        <DailyTable daily={data.daily} fx={data.fxGbpToUsd} />
+        <DailyTable
+          daily={data.daily}
+          fx={data.fxGbpToUsd}
+          trackedConversions={data.trackedConversions}
+        />
       </section>
 
       <footer className="mt-10 border-t border-white/10 pt-4 text-xs text-neutral-600">

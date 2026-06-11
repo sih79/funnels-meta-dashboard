@@ -14,6 +14,7 @@ import type {
   ClientRow,
   ProfileRow,
   SyncLogRow,
+  TrackedConversionRow,
 } from "@/lib/supabase/db.types";
 
 export interface BusinessManagerSummary {
@@ -234,4 +235,57 @@ export async function getAdminClientDetail(
       (p) => ({ id: p.id, fullName: p.full_name }),
     ),
   };
+}
+
+export interface TrackedConversionSummary {
+  id: string;
+  actionType: string;
+  displayName: string;
+  isEnabled: boolean;
+  displayOrder: number;
+  metaName: string | null;
+  customConversionId: string | null;
+}
+
+/**
+ * All discovered tracked_conversions for one ad account, oldest discovered
+ * first then enabled rows on top. Used by the per-account picker UI.
+ */
+export async function getTrackedConversionsForAccount(
+  adAccountId: string,
+): Promise<TrackedConversionSummary[]> {
+  if (!isSupabaseConfigured()) return [];
+  const admin = createAdminClient();
+
+  const { data, error } = await admin
+    .from("tracked_conversions")
+    .select(
+      "id, action_type, display_name, is_enabled, display_order, meta_name, custom_conversion_id, first_seen_at",
+    )
+    .eq("ad_account_id", adAccountId)
+    .order("is_enabled", { ascending: false })
+    .order("display_order", { ascending: true })
+    .order("display_name", { ascending: true });
+  if (error || !data) return [];
+
+  return (
+    data as Pick<
+      TrackedConversionRow,
+      | "id"
+      | "action_type"
+      | "display_name"
+      | "is_enabled"
+      | "display_order"
+      | "meta_name"
+      | "custom_conversion_id"
+    >[]
+  ).map((r) => ({
+    id: r.id,
+    actionType: r.action_type,
+    displayName: r.display_name,
+    isEnabled: r.is_enabled,
+    displayOrder: r.display_order,
+    metaName: r.meta_name,
+    customConversionId: r.custom_conversion_id,
+  }));
 }

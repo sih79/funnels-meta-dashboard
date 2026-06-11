@@ -10,6 +10,7 @@ export interface DailyMetric {
   reach: number;
   impressions: number;
   revenueUsd: number; // attributed revenue, used for ROAS
+  conversions?: Record<string, number>; // action_type → count for this day
 }
 
 export interface Campaign {
@@ -23,6 +24,7 @@ export interface Campaign {
   reach: number;
   impressions: number;
   revenueUsd: number;
+  conversions?: Record<string, number>; // action_type → count summed over the range
 }
 
 export interface Totals {
@@ -40,6 +42,14 @@ export interface Totals {
   convRate: number; // leads / clicks
   ctr: number; // clicks / impressions
   roas: number; // revenueUsd / spendUsd
+  conversionTotals: Record<string, number>; // action_type → total count
+  costPerConversion: Record<string, number>; // action_type → spendGbp / count
+}
+
+export interface TrackedConversion {
+  actionType: string;
+  displayName: string;
+  displayOrder: number;
 }
 
 export interface DashboardData {
@@ -51,4 +61,5 @@ export interface DashboardData {
   daily: DailyMetric[];
   campaigns: Campaign[];
   totals: Totals;
+  trackedConversions: TrackedConversion[];
 }

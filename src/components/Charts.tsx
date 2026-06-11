@@ -85,15 +85,32 @@ export function SpendRoasChart({
   );
 }
 
-export function LeadsCplChart({ daily }: { daily: DailyMetric[] }) {
-  const data = daily.map((d) => ({
-    date: shortDate(d.date),
-    leads: d.leads,
-    cpl: +(d.spendGbp / d.leads).toFixed(2),
-  }));
+export function LeadsCplChart({
+  daily,
+  actionType,
+  displayName,
+}: {
+  daily: DailyMetric[];
+  actionType?: string | null;
+  displayName?: string;
+}) {
+  // Use the first enabled tracked conversion when provided; otherwise fall
+  // back to the legacy `leads` field on DailyMetric so a not-yet-configured
+  // account still gets a chart.
+  const label = displayName ?? "Leads";
+  const data = daily.map((d) => {
+    const count = actionType
+      ? d.conversions?.[actionType] ?? 0
+      : d.leads;
+    return {
+      date: shortDate(d.date),
+      leads: count,
+      cpl: count ? +(d.spendGbp / count).toFixed(2) : 0,
+    };
+  });
 
   return (
-    <ChartCard title="Leads & Cost per Lead over time">
+    <ChartCard title={`${label} & Cost per ${label} over time`}>
       <ComposedChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
         <CartesianGrid stroke={GRID} vertical={false} />
         <XAxis dataKey="date" stroke={AXIS} tick={{ fontSize: 11 }} interval={4} />
@@ -108,15 +125,15 @@ export function LeadsCplChart({ daily }: { daily: DailyMetric[] }) {
         <Tooltip
           contentStyle={tooltipStyle}
           formatter={(value, name) =>
-            name === "Leads" ? String(value) : gbp(Number(value))
+            name === "Cost" ? gbp(Number(value)) : String(value)
           }
         />
-        <Bar yAxisId="l" dataKey="leads" name="Leads" fill={GREEN} radius={[3, 3, 0, 0]} />
+        <Bar yAxisId="l" dataKey="leads" name={label} fill={GREEN} radius={[3, 3, 0, 0]} />
         <Line
           yAxisId="r"
           type="monotone"
           dataKey="cpl"
-          name="CPL"
+          name="Cost"
           stroke={GOLD}
           strokeWidth={2}
           dot={false}

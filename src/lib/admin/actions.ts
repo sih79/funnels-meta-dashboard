@@ -25,6 +25,7 @@ import type {
   BusinessManagerRow,
   ClientRow,
   AccountSource,
+  TrackedConversionRow,
 } from "@/lib/supabase/db.types";
 
 // The shape every form action returns. `ok` drives whether we show a success
@@ -678,4 +679,69 @@ export async function updateBusinessManagerTokenAction(
   revalidatePath("/admin/business-managers");
   revalidatePath("/admin");
   return { ok: true, message: "Meta token saved." };
+}
+
+// -----------------------------------------------------------------------------
+// Tracked conversions picker (per ad account).
+// -----------------------------------------------------------------------------
+
+/**
+ * Update one tracked_conversions row — toggle is_enabled, rename display_name,
+ * reorder via display_order. Verified the caller can see the ad_account via
+ * RLS-aware select before writing (defence-in-depth on top of RLS).
+ */
+export async function updateTrackedConversionAction(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  await requireStaff();
+  if (!isSupabaseConfigured()) {
+    return { ok: false, message: "Set up Supabase first (see SETUP.md)." };
+  }
+
+  const id = String(formData.get("id") ?? "").trim();
+  const slug = String(formData.get("slug") ?? "").trim();
+  const displayName = String(formData.get("display_name") ?? "").trim();
+  const displayOrderRaw = String(formData.get("display_order") ?? "0").trim();
+  const isEnabled = String(formData.get("is_enabled") ?? "").trim() === "on";
+
+  if (!id) return { ok: false, message: "Missing conversion id." };
+  if (!displayName) return { ok: false, message: "Display name cannot be empty." };
+  const displayOrder = Number.parseInt(displayOrderRaw, 10);
+  if (!Number.isFinite(displayOrder)) {
+    return { ok: false, message: "Display order must be a whole number." };
+  }
+
+  // Access check via the user's server client: RLS will refuse the lookup if
+  // they aren't allowed to see this row, giving us a free authorisation check.
+  const supabase = await createClient();
+  const { data: existing } = await supabase
+    .from("tracked_conversions")
+    .select("id, ad_account_id")
+    .eq("id", id)
+    .limit(1);
+  const row =
+    (existing as Pick<TrackedConversionRow, "id" | "ad_account_id">[] | null)?.[0] ?? null;
+  if (!row) {
+    return { ok: false, message: "Conversion not found or not accessible." };
+  }
+
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("tracked_conversions")
+    .update({
+      display_name: displayName,
+      display_order: displayOrder,
+      is_enabled: isEnabled,
+      updated_at: new Date().toISOString(),
+    } as never)
+    .eq("id", id);
+
+  if (error) {
+    return { ok: false, message: `Could not save conversion: ${error.message}` };
+  }
+
+  if (slug) revalidatePath(`/admin/clients/${slug}`);
+  revalidatePath("/admin");
+  return { ok: true, message: `Saved "${displayName}".` };
 }
