@@ -38,6 +38,16 @@ export default async function AdminHome() {
         <p className="mt-1 text-sm text-neutral-400">
           Add clients, connect their Meta ad accounts and invite their logins.
         </p>
+        {callerIsSuperAdmin ? (
+          <div className="mt-4">
+            <Link
+              href="/admin/business-managers"
+              className="inline-flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-400/5 px-3 py-1.5 text-sm font-medium text-amber-300 transition hover:border-amber-400/60 hover:bg-amber-400/10 hover:text-amber-200"
+            >
+              Manage business managers &rarr;
+            </Link>
+          </div>
+        ) : null}
       </header>
 
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_360px]">

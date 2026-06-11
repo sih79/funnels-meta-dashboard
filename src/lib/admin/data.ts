@@ -40,6 +40,45 @@ export async function getBusinessManagers(): Promise<BusinessManagerSummary[]> {
   }));
 }
 
+export interface BusinessManagerWithTokenStatus {
+  id: string;
+  name: string;
+  slug: string;
+  hasMetaToken: boolean;
+  metaTokenUpdatedAt: string | null;
+}
+
+/**
+ * Business managers + a boolean flag for whether a per-BM Meta token is set.
+ * NEVER returns the ciphertext or the plaintext token — only the boolean and
+ * the "set when" timestamp. Safe to render in a server component.
+ */
+export async function getBusinessManagersWithTokenStatus(): Promise<
+  BusinessManagerWithTokenStatus[]
+> {
+  if (!isSupabaseConfigured()) return [];
+  const admin = createAdminClient();
+
+  const { data, error } = await admin
+    .from("business_managers")
+    .select("id, name, slug, meta_access_token_encrypted, meta_token_updated_at")
+    .order("name", { ascending: true });
+  if (error || !data) return [];
+
+  return (
+    data as Pick<
+      BusinessManagerRow,
+      "id" | "name" | "slug" | "meta_access_token_encrypted" | "meta_token_updated_at"
+    >[]
+  ).map((bm) => ({
+    id: bm.id,
+    name: bm.name,
+    slug: bm.slug,
+    hasMetaToken: Boolean(bm.meta_access_token_encrypted),
+    metaTokenUpdatedAt: bm.meta_token_updated_at,
+  }));
+}
+
 export interface AdminClientSummary {
   id: string;
   name: string;

@@ -11,6 +11,10 @@ export interface BusinessManagerRow {
   name: string;
   slug: string;
   created_at: string; // timestamptz
+  // Per-BM Meta access token (encrypted at the app layer with AES-256-GCM —
+  // base64 of iv||ciphertext||authTag). Added in migration 0006.
+  meta_access_token_encrypted: string | null;
+  meta_token_updated_at: string | null; // timestamptz
 }
 
 export interface ProfileRow {

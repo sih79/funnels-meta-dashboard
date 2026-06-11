@@ -6,8 +6,11 @@ import "server-only";
 // are caught PER ACCOUNT so one bad account never kills the whole batch.
 
 import { createAdminClient } from "./supabase/admin";
+import { decryptSecret } from "./crypto";
 import type {
   AdAccountRow,
+  BusinessManagerRow,
+  ClientRow,
   SyncLogRow,
   MetricsDailyRow,
   CampaignMetricsDailyRow,
@@ -113,22 +116,68 @@ async function updateSyncLog(id: string, patch: SyncLogUpdate): Promise<void> {
 }
 
 /**
- * Pick the Meta access token for an account. Agency-owned accounts use the
- * shared system-user token in META_ACCESS_TOKEN. Client-OAuth accounts have no
- * token until Phase 6 (per-client OAuth) — so we skip them with a clear note.
+ * Pick the Meta access token for an agency-owned account.
+ *
+ * Lookup order:
+ *  1. Per-BM token: load the account's client.business_manager_id and decrypt
+ *     business_managers.meta_access_token_encrypted with TOKEN_ENCRYPTION_KEY.
+ *  2. Fallback: process.env.META_ACCESS_TOKEN (back-compat for setups that
+ *     haven't migrated yet — keeps the current SH ACQ flow working).
+ *  3. Otherwise: skip with a clear "No Meta token for this BM" message that
+ *     bubbles up into sync_log.
+ *
+ * Client-OAuth accounts (Phase 6) are still skipped — they get their own token
+ * per client via OAuth.
  */
-function resolveToken(account: AdAccountRow): { token: string } | { skip: string } {
-  if (account.source === "agency") {
-    const token = process.env.META_ACCESS_TOKEN;
-    if (!token) {
-      return { skip: "No META_ACCESS_TOKEN set for agency accounts." };
-    }
-    return { token };
+async function resolveToken(
+  account: AdAccountRow,
+): Promise<{ token: string } | { skip: string }> {
+  if (account.source !== "agency") {
+    return {
+      skip: "client_oauth account has no stored token yet (handled in Phase 6).",
+    };
   }
-  // 'client_oauth'
-  return {
-    skip: "client_oauth account has no stored token yet (handled in Phase 6).",
-  };
+
+  const admin = createAdminClient();
+
+  // 1. Look up the per-BM encrypted token via the account's client.
+  const { data: clientRows } = await admin
+    .from("clients")
+    .select("business_manager_id")
+    .eq("id", account.client_id)
+    .limit(1);
+  const bmId =
+    (clientRows as Pick<ClientRow, "business_manager_id">[] | null)?.[0]
+      ?.business_manager_id ?? null;
+
+  if (bmId) {
+    const { data: bmRows } = await admin
+      .from("business_managers")
+      .select("meta_access_token_encrypted")
+      .eq("id", bmId)
+      .limit(1);
+    const encrypted =
+      (bmRows as Pick<BusinessManagerRow, "meta_access_token_encrypted">[] | null)?.[0]
+        ?.meta_access_token_encrypted ?? null;
+    if (encrypted) {
+      try {
+        const token = decryptSecret(encrypted);
+        if (token) return { token };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        return {
+          skip: `Could not decrypt per-BM Meta token: ${message}. Re-save the token in /admin/business-managers.`,
+        };
+      }
+    }
+  }
+
+  // 2. Fallback to the legacy shared env token (back-compat).
+  const envToken = process.env.META_ACCESS_TOKEN;
+  if (envToken) return { token: envToken };
+
+  // 3. Nothing available.
+  return { skip: "No Meta token for this BM" };
 }
 
 /**
@@ -150,7 +199,7 @@ export async function syncAdAccount(
     rowsWritten: 0,
   };
 
-  const tokenOrSkip = resolveToken(account);
+  const tokenOrSkip = await resolveToken(account);
   if ("skip" in tokenOrSkip) {
     // Record the skip in sync_log so the reason is visible in the UI later.
     await insertSyncLog({

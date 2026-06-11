@@ -19,8 +19,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
 import { backfillAdAccount } from "@/lib/sync";
 import { slugify } from "@/lib/admin/slug";
+import { encryptSecret } from "@/lib/crypto";
 import type {
   AdAccountRow,
+  BusinessManagerRow,
   ClientRow,
   AccountSource,
 } from "@/lib/supabase/db.types";
@@ -439,4 +441,241 @@ async function findUserIdByEmail(
     if (data.users.length < perPage) break; // last page
   }
   return null;
+}
+
+// -----------------------------------------------------------------------------
+// Business Manager management (super_admin only).
+//
+// These three actions manage the business_managers table and its per-BM Meta
+// access token. RLS only lets super_admins write, but we ALSO gate inside each
+// action — Server Actions are POSTable directly, so defence-in-depth is a must.
+// Writes go through the service-role admin client for simplicity (the RLS gate
+// is a backup; the explicit isSuperAdmin check here is the primary gate).
+// -----------------------------------------------------------------------------
+
+const SLUG_RE = /^[a-z0-9-]+$/;
+
+/**
+ * Create a business manager. Optionally accepts an initial Meta access token,
+ * which is encrypted via encryptSecret before being stored.
+ */
+export async function createBusinessManagerAction(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  const caller = await requireStaff();
+  if (!isSuperAdmin(caller)) {
+    return {
+      ok: false,
+      message: "Only super admins can manage business managers.",
+    };
+  }
+  if (!isSupabaseConfigured()) {
+    return { ok: false, message: "Set up Supabase first (see SETUP.md)." };
+  }
+
+  const name = String(formData.get("name") ?? "").trim();
+  const rawSlug = String(formData.get("slug") ?? "").trim();
+  const token = String(formData.get("meta_access_token") ?? "").trim();
+
+  if (!name) {
+    return { ok: false, message: "Please enter a business manager name." };
+  }
+
+  const slug = slugify(rawSlug || name);
+  if (!slug || !SLUG_RE.test(slug)) {
+    return {
+      ok: false,
+      message:
+        "Slug must be lowercase letters, numbers and hyphens only (e.g. 'sh-acq').",
+    };
+  }
+
+  const admin = createAdminClient();
+
+  // Friendly pre-check for a duplicate slug (DB unique constraint is the real guard).
+  const { data: existing } = await admin
+    .from("business_managers")
+    .select("id")
+    .eq("slug", slug)
+    .limit(1);
+  if (existing && existing.length > 0) {
+    return {
+      ok: false,
+      message: `The slug "${slug}" is already taken. Pick a different one.`,
+    };
+  }
+
+  const insert: Partial<BusinessManagerRow> = {
+    name,
+    slug,
+  };
+  if (token) {
+    try {
+      insert.meta_access_token_encrypted = encryptSecret(token);
+      insert.meta_token_updated_at = new Date().toISOString();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return { ok: false, message: `Could not encrypt token: ${message}` };
+    }
+  }
+
+  const { error } = await admin.from("business_managers").insert(insert as never);
+  if (error) {
+    return {
+      ok: false,
+      message: `Could not create business manager: ${error.message}`,
+    };
+  }
+
+  revalidatePath("/admin/business-managers");
+  revalidatePath("/admin");
+  return { ok: true, message: `Created business manager "${name}".` };
+}
+
+/**
+ * Update an existing business manager's name and slug. The Meta token is
+ * managed separately by updateBusinessManagerTokenAction.
+ */
+export async function updateBusinessManagerAction(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  const caller = await requireStaff();
+  if (!isSuperAdmin(caller)) {
+    return {
+      ok: false,
+      message: "Only super admins can manage business managers.",
+    };
+  }
+  if (!isSupabaseConfigured()) {
+    return { ok: false, message: "Set up Supabase first (see SETUP.md)." };
+  }
+
+  const id = String(formData.get("id") ?? "").trim();
+  const name = String(formData.get("name") ?? "").trim();
+  const rawSlug = String(formData.get("slug") ?? "").trim();
+
+  if (!id) return { ok: false, message: "Missing business manager id." };
+  if (!name) return { ok: false, message: "Please enter a name." };
+
+  const slug = slugify(rawSlug || name);
+  if (!slug || !SLUG_RE.test(slug)) {
+    return {
+      ok: false,
+      message:
+        "Slug must be lowercase letters, numbers and hyphens only (e.g. 'sh-acq').",
+    };
+  }
+
+  const admin = createAdminClient();
+
+  // Slug must be unique across other rows (excluding self).
+  const { data: clash } = await admin
+    .from("business_managers")
+    .select("id")
+    .eq("slug", slug)
+    .neq("id", id)
+    .limit(1);
+  if (clash && clash.length > 0) {
+    return {
+      ok: false,
+      message: `The slug "${slug}" is already taken by another business manager.`,
+    };
+  }
+
+  const { error } = await admin
+    .from("business_managers")
+    .update({ name, slug } as never)
+    .eq("id", id);
+  if (error) {
+    return {
+      ok: false,
+      message: `Could not update business manager: ${error.message}`,
+    };
+  }
+
+  revalidatePath("/admin/business-managers");
+  revalidatePath("/admin");
+  return { ok: true, message: "Business manager updated." };
+}
+
+/**
+ * Update (rotate) or remove the per-BM Meta access token.
+ *
+ * UX rules (kept simple to avoid confusion with password fields):
+ *  - If `remove=1` is submitted, we clear the token regardless of input.
+ *  - Otherwise, a non-empty `meta_access_token` REPLACES the existing one.
+ *  - An empty submission with no `remove` flag is a no-op (returns an error
+ *    so the admin gets clear feedback rather than a silent "nothing happened").
+ */
+export async function updateBusinessManagerTokenAction(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  const caller = await requireStaff();
+  if (!isSuperAdmin(caller)) {
+    return {
+      ok: false,
+      message: "Only super admins can manage business managers.",
+    };
+  }
+  if (!isSupabaseConfigured()) {
+    return { ok: false, message: "Set up Supabase first (see SETUP.md)." };
+  }
+
+  const id = String(formData.get("id") ?? "").trim();
+  const remove = String(formData.get("remove") ?? "").trim() === "1";
+  const token = String(formData.get("meta_access_token") ?? "").trim();
+
+  if (!id) return { ok: false, message: "Missing business manager id." };
+
+  const admin = createAdminClient();
+
+  if (remove) {
+    const { error } = await admin
+      .from("business_managers")
+      .update({
+        meta_access_token_encrypted: null,
+        meta_token_updated_at: null,
+      } as never)
+      .eq("id", id);
+    if (error) {
+      return { ok: false, message: `Could not remove token: ${error.message}` };
+    }
+    revalidatePath("/admin/business-managers");
+    revalidatePath("/admin");
+    return { ok: true, message: "Meta token removed." };
+  }
+
+  if (!token) {
+    return {
+      ok: false,
+      message:
+        "Paste a Meta access token to replace the current one, or use Remove to clear it.",
+    };
+  }
+
+  let encrypted: string;
+  try {
+    encrypted = encryptSecret(token);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return { ok: false, message: `Could not encrypt token: ${message}` };
+  }
+
+  const { error } = await admin
+    .from("business_managers")
+    .update({
+      meta_access_token_encrypted: encrypted,
+      meta_token_updated_at: new Date().toISOString(),
+    } as never)
+    .eq("id", id);
+  if (error) {
+    return { ok: false, message: `Could not save token: ${error.message}` };
+  }
+
+  revalidatePath("/admin/business-managers");
+  revalidatePath("/admin");
+  return { ok: true, message: "Meta token saved." };
 }
