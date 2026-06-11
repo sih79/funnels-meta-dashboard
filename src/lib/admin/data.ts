@@ -10,10 +10,35 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
 import type {
   AdAccountRow,
+  BusinessManagerRow,
   ClientRow,
   ProfileRow,
   SyncLogRow,
 } from "@/lib/supabase/db.types";
+
+export interface BusinessManagerSummary {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+/** All business managers, for dropdowns and labels. RLS-enforced (staff/super_admin only). */
+export async function getBusinessManagers(): Promise<BusinessManagerSummary[]> {
+  if (!isSupabaseConfigured()) return [];
+  const admin = createAdminClient();
+
+  const { data, error } = await admin
+    .from("business_managers")
+    .select("id, name, slug")
+    .order("name", { ascending: true });
+  if (error || !data) return [];
+
+  return (data as Pick<BusinessManagerRow, "id" | "name" | "slug">[]).map((bm) => ({
+    id: bm.id,
+    name: bm.name,
+    slug: bm.slug,
+  }));
+}
 
 export interface AdminClientSummary {
   id: string;
@@ -21,16 +46,17 @@ export interface AdminClientSummary {
   slug: string;
   logoUrl: string | null;
   adAccountCount: number;
+  businessManagerName: string | null;
 }
 
-/** All clients with a count of their ad accounts, for the /admin landing. */
+/** All clients with a count of their ad accounts and BM name, for the /admin landing. */
 export async function getAdminClients(): Promise<AdminClientSummary[]> {
   if (!isSupabaseConfigured()) return [];
   const admin = createAdminClient();
 
   const { data: clients, error } = await admin
     .from("clients")
-    .select("id, name, slug, logo_url")
+    .select("id, name, slug, logo_url, business_manager_id")
     .order("name", { ascending: true });
   if (error || !clients) return [];
 
@@ -40,15 +66,35 @@ export async function getAdminClients(): Promise<AdminClientSummary[]> {
     counts.set(a.client_id, (counts.get(a.client_id) ?? 0) + 1);
   }
 
-  return (clients as Pick<ClientRow, "id" | "name" | "slug" | "logo_url">[]).map(
-    (c) => ({
-      id: c.id,
-      name: c.name,
-      slug: c.slug,
-      logoUrl: c.logo_url,
-      adAccountCount: counts.get(c.id) ?? 0,
-    }),
-  );
+  // Fetch BM names to avoid N+1. Build a lookup map.
+  const bmIds = [
+    ...new Set(
+      (clients as Pick<ClientRow, "id" | "name" | "slug" | "logo_url" | "business_manager_id">[])
+        .map((c) => c.business_manager_id)
+        .filter((id): id is string => id !== null),
+    ),
+  ];
+  const bmNames = new Map<string, string>();
+  if (bmIds.length > 0) {
+    const { data: bms } = await admin
+      .from("business_managers")
+      .select("id, name")
+      .in("id", bmIds);
+    for (const bm of (bms as Pick<BusinessManagerRow, "id" | "name">[] | null) ?? []) {
+      bmNames.set(bm.id, bm.name);
+    }
+  }
+
+  return (
+    clients as Pick<ClientRow, "id" | "name" | "slug" | "logo_url" | "business_manager_id">[]
+  ).map((c) => ({
+    id: c.id,
+    name: c.name,
+    slug: c.slug,
+    logoUrl: c.logo_url,
+    adAccountCount: counts.get(c.id) ?? 0,
+    businessManagerName: c.business_manager_id ? (bmNames.get(c.business_manager_id) ?? null) : null,
+  }));
 }
 
 export interface AdminAdAccount {

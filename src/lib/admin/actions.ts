@@ -62,9 +62,13 @@ export async function createClientAction(
   const name = String(formData.get("name") ?? "").trim();
   const rawSlug = String(formData.get("slug") ?? "").trim();
   const logoUrl = String(formData.get("logo_url") ?? "").trim();
+  const businessManagerId = String(formData.get("business_manager_id") ?? "").trim();
 
   if (!name) {
     return { ok: false, message: "Please enter a client name." };
+  }
+  if (!businessManagerId) {
+    return { ok: false, message: "Please select a business manager." };
   }
 
   const slug = slugify(rawSlug || name);
@@ -94,6 +98,7 @@ export async function createClientAction(
     name,
     slug,
     logo_url: logoUrl || null,
+    business_manager_id: businessManagerId,
   };
 
   const { error } = await supabase.from("clients").insert(insert as never);

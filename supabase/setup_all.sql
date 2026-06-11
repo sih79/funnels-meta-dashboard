@@ -390,3 +390,312 @@ values
   ('aaaaaaa1-0000-0000-0000-000000000001', 'agency', 'Agency Retainer',    'active', current_date, 39.80, 54, 4000, 2600, 5, 2, 300.00),
   ('aaaaaaa1-0000-0000-0000-000000000001', 'cbt',    'CBT Webinar',        'paused', current_date, 21.30, 33, 2700, 1800, 3, 1, 150.00)
 on conflict (ad_account_id, campaign_id, date) do nothing;
+
+-- ============ 0004_business_managers.sql ============
+-- ============================================================================
+-- 0004_business_managers.sql — Adds Business Manager scoping.
+-- ============================================================================
+
+-- a) Create business_managers table
+create table if not exists public.business_managers (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null,
+  slug       text not null unique,
+  created_at timestamptz not null default now()
+);
+
+-- b) Add business_manager_id to clients (nullable — existing clients unaffected until assigned)
+alter table public.clients
+  add column if not exists business_manager_id uuid references public.business_managers(id) on delete set null;
+
+-- c) Add 'super_admin' value to user_role enum
+alter type public.user_role add value if not exists 'super_admin';
+
+-- d) Add business_manager_id to profiles (nullable — super_admin has null = sees all)
+alter table public.profiles
+  add column if not exists business_manager_id uuid references public.business_managers(id) on delete set null;
+
+-- e) Seed the two initial business managers
+insert into public.business_managers (id, name, slug) values
+  ('b0000001-0000-0000-0000-000000000001', 'Simon Hearn''s Business', 'simon-hearn'),
+  ('b0000002-0000-0000-0000-000000000002', 'SH ACQ', 'sh-acq')
+on conflict (slug) do nothing;
+
+-- f) Auto-promote: existing admins with no BM assigned become super_admin
+update public.profiles
+  set role = 'super_admin'
+  where role = 'admin'
+    and business_manager_id is null;
+
+-- g) Assign demo clients to business managers
+update public.clients set business_manager_id = 'b0000001-0000-0000-0000-000000000001' where slug = 'funnels';
+update public.clients set business_manager_id = 'b0000002-0000-0000-0000-000000000002' where slug = 'shaqir';
+update public.clients set business_manager_id = 'b0000002-0000-0000-0000-000000000002' where slug = 'acme';
+
+-- ============ 0005_rls_bm.sql ============
+-- ============================================================================
+-- 0005_rls_bm.sql — Update RLS helpers and policies for Business Manager scoping.
+-- ============================================================================
+
+-- Helper: is_super_admin()
+create or replace function public.is_super_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.profiles p
+    where p.id = auth.uid()
+      and p.role = 'super_admin'
+  );
+$$;
+
+-- Helper: is_staff() — updated to include super_admin
+create or replace function public.is_staff()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.profiles p
+    where p.id = auth.uid()
+      and p.role in ('admin', 'staff', 'super_admin')
+  );
+$$;
+
+-- Helper: current_bm_id()
+create or replace function public.current_bm_id()
+returns uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select business_manager_id from public.profiles where id = auth.uid();
+$$;
+
+-- Helper: can_access_client(client_id uuid)
+create or replace function public.can_access_client(p_client_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    public.is_super_admin()
+    or (
+      public.is_staff()
+      and exists (
+        select 1
+        from public.clients c
+        join public.profiles pr on pr.id = auth.uid()
+        where c.id = p_client_id
+          and c.business_manager_id = pr.business_manager_id
+          and pr.role in ('admin', 'staff')
+      )
+    );
+$$;
+
+-- Helper: current_client_id() — unchanged
+create or replace function public.current_client_id()
+returns uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select client_id from public.profiles where id = auth.uid();
+$$;
+
+-- profiles
+drop policy if exists profiles_select_self on public.profiles;
+create policy profiles_select_self on public.profiles
+  for select using (id = auth.uid());
+
+drop policy if exists profiles_select_staff on public.profiles;
+create policy profiles_select_staff on public.profiles
+  for select using (public.is_staff());
+
+-- clients
+drop policy if exists clients_staff_all on public.clients;
+drop policy if exists clients_staff_select on public.clients;
+create policy clients_staff_select on public.clients
+  for select using (public.can_access_client(id));
+
+drop policy if exists clients_client_select on public.clients;
+create policy clients_client_select on public.clients
+  for select using (id = public.current_client_id());
+
+drop policy if exists clients_staff_write on public.clients;
+create policy clients_staff_write on public.clients
+  for all
+  using (
+    public.is_super_admin()
+    or (
+      exists (
+        select 1 from public.profiles pr
+        where pr.id = auth.uid()
+          and pr.role in ('admin', 'staff')
+          and (
+            clients.business_manager_id = pr.business_manager_id
+            or clients.business_manager_id is null
+          )
+      )
+    )
+  )
+  with check (
+    public.is_super_admin()
+    or (
+      exists (
+        select 1 from public.profiles pr
+        where pr.id = auth.uid()
+          and pr.role in ('admin', 'staff')
+          and (
+            clients.business_manager_id = pr.business_manager_id
+            or clients.business_manager_id is null
+          )
+      )
+    )
+  );
+
+-- ad_accounts
+drop policy if exists ad_accounts_staff_all on public.ad_accounts;
+drop policy if exists ad_accounts_staff_select on public.ad_accounts;
+create policy ad_accounts_staff_select on public.ad_accounts
+  for select using (public.can_access_client(client_id));
+
+drop policy if exists ad_accounts_client_select on public.ad_accounts;
+create policy ad_accounts_client_select on public.ad_accounts
+  for select using (client_id = public.current_client_id());
+
+drop policy if exists ad_accounts_staff_write on public.ad_accounts;
+create policy ad_accounts_staff_write on public.ad_accounts
+  for all
+  using (public.can_access_client(client_id))
+  with check (public.can_access_client(client_id));
+
+-- metrics_daily
+drop policy if exists metrics_daily_staff_all on public.metrics_daily;
+drop policy if exists metrics_daily_staff_select on public.metrics_daily;
+create policy metrics_daily_staff_select on public.metrics_daily
+  for select using (
+    exists (
+      select 1 from public.ad_accounts a
+      where a.id = metrics_daily.ad_account_id
+        and public.can_access_client(a.client_id)
+    )
+  );
+
+drop policy if exists metrics_daily_client_select on public.metrics_daily;
+create policy metrics_daily_client_select on public.metrics_daily
+  for select using (
+    exists (
+      select 1 from public.ad_accounts a
+      where a.id = metrics_daily.ad_account_id
+        and a.client_id = public.current_client_id()
+    )
+  );
+
+drop policy if exists metrics_daily_staff_write on public.metrics_daily;
+create policy metrics_daily_staff_write on public.metrics_daily
+  for all
+  using (
+    exists (
+      select 1 from public.ad_accounts a
+      where a.id = metrics_daily.ad_account_id
+        and public.can_access_client(a.client_id)
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.ad_accounts a
+      where a.id = metrics_daily.ad_account_id
+        and public.can_access_client(a.client_id)
+    )
+  );
+
+-- campaign_metrics_daily
+drop policy if exists campaign_metrics_daily_staff_all on public.campaign_metrics_daily;
+drop policy if exists campaign_metrics_daily_staff_select on public.campaign_metrics_daily;
+create policy campaign_metrics_daily_staff_select on public.campaign_metrics_daily
+  for select using (
+    exists (
+      select 1 from public.ad_accounts a
+      where a.id = campaign_metrics_daily.ad_account_id
+        and public.can_access_client(a.client_id)
+    )
+  );
+
+drop policy if exists campaign_metrics_daily_client_select on public.campaign_metrics_daily;
+create policy campaign_metrics_daily_client_select on public.campaign_metrics_daily
+  for select using (
+    exists (
+      select 1 from public.ad_accounts a
+      where a.id = campaign_metrics_daily.ad_account_id
+        and a.client_id = public.current_client_id()
+    )
+  );
+
+drop policy if exists campaign_metrics_daily_staff_write on public.campaign_metrics_daily;
+create policy campaign_metrics_daily_staff_write on public.campaign_metrics_daily
+  for all
+  using (
+    exists (
+      select 1 from public.ad_accounts a
+      where a.id = campaign_metrics_daily.ad_account_id
+        and public.can_access_client(a.client_id)
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.ad_accounts a
+      where a.id = campaign_metrics_daily.ad_account_id
+        and public.can_access_client(a.client_id)
+    )
+  );
+
+-- meta_connections
+drop policy if exists meta_connections_staff_all on public.meta_connections;
+create policy meta_connections_staff_all on public.meta_connections
+  for all
+  using (public.can_access_client(client_id))
+  with check (public.can_access_client(client_id));
+
+-- sync_log
+drop policy if exists sync_log_staff_all on public.sync_log;
+create policy sync_log_staff_all on public.sync_log
+  for all
+  using (
+    exists (
+      select 1 from public.ad_accounts a
+      where a.id = sync_log.ad_account_id
+        and public.can_access_client(a.client_id)
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.ad_accounts a
+      where a.id = sync_log.ad_account_id
+        and public.can_access_client(a.client_id)
+    )
+  );
+
+-- business_managers
+alter table public.business_managers enable row level security;
+
+drop policy if exists bm_staff_select on public.business_managers;
+create policy bm_staff_select on public.business_managers
+  for select using (public.is_staff());
+
+drop policy if exists bm_super_admin_write on public.business_managers;
+create policy bm_super_admin_write on public.business_managers
+  for all
+  using (public.is_super_admin())
+  with check (public.is_super_admin());

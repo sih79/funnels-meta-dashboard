@@ -66,16 +66,29 @@ export async function requireUser(): Promise<User> {
 }
 
 /**
- * Require an admin/staff profile. Redirects unauthenticated users to /login and
- * authenticated-but-unauthorised users (role 'client') to /forbidden.
- * Returns the profile so callers can use role/client_id.
+ * Returns true when the profile has the super_admin role.
+ * super_admin can see all clients across all business managers.
+ */
+export function isSuperAdmin(profile: ProfileRow): boolean {
+  return profile.role === "super_admin";
+}
+
+/**
+ * Require an admin/staff/super_admin profile. Redirects unauthenticated users
+ * to /login and authenticated-but-unauthorised users (role 'client') to
+ * /forbidden. Returns the profile so callers can use role/client_id.
  */
 export async function requireStaff(): Promise<ProfileRow> {
   const user = await getSessionUser();
   if (!user) redirect("/login");
 
   const profile = await getProfile();
-  if (!profile || (profile.role !== "admin" && profile.role !== "staff")) {
+  if (
+    !profile ||
+    (profile.role !== "admin" &&
+      profile.role !== "staff" &&
+      profile.role !== "super_admin")
+  ) {
     redirect("/forbidden");
   }
   return profile;

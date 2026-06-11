@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { requireStaff } from "@/lib/auth";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
-import { getAdminClients } from "@/lib/admin/data";
+import { getAdminClients, getBusinessManagers } from "@/lib/admin/data";
 import AddClientForm from "@/components/admin/AddClientForm";
 
 // Admin landing: manage all clients. Staff-only. force-dynamic because it
@@ -17,7 +17,10 @@ export default async function AdminHome() {
     return <NotConfigured />;
   }
 
-  const clients = await getAdminClients();
+  const [clients, businessManagers] = await Promise.all([
+    getAdminClients(),
+    getBusinessManagers(),
+  ]);
 
   return (
     <main className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
@@ -50,6 +53,12 @@ export default async function AdminHome() {
                     <p className="text-xs text-neutral-500">
                       /{c.slug} · {c.adAccountCount}{" "}
                       {c.adAccountCount === 1 ? "ad account" : "ad accounts"}
+                      {c.businessManagerName ? (
+                        <>
+                          {" · "}
+                          <span className="text-amber-400/80">{c.businessManagerName}</span>
+                        </>
+                      ) : null}
                     </p>
                   </div>
                   <Link
@@ -67,7 +76,7 @@ export default async function AdminHome() {
         {/* Add a client */}
         <section className="rounded-xl border border-white/10 bg-neutral-900/50 p-6">
           <h2 className="mb-4 text-lg font-semibold text-white">Add a client</h2>
-          <AddClientForm />
+          <AddClientForm businessManagers={businessManagers} />
         </section>
       </div>
     </main>

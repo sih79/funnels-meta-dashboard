@@ -1,9 +1,17 @@
 // Hand-written database types for the Supabase Postgres schema.
-// Mirrors supabase/migrations/0001_init.sql. Keep these in sync if you
-// change the migrations. Metric columns mirror DailyMetric in src/lib/types.ts.
+// Mirrors supabase/migrations/0001_init.sql + 0004_business_managers.sql.
+// Keep these in sync if you change the migrations.
+// Metric columns mirror DailyMetric in src/lib/types.ts.
 
-export type UserRole = "admin" | "staff" | "client";
+export type UserRole = "admin" | "staff" | "client" | "super_admin";
 export type AccountSource = "agency" | "client_oauth";
+
+export interface BusinessManagerRow {
+  id: string; // uuid
+  name: string;
+  slug: string;
+  created_at: string; // timestamptz
+}
 
 export interface ProfileRow {
   id: string; // uuid, references auth.users
@@ -11,6 +19,7 @@ export interface ProfileRow {
   client_id: string | null; // uuid, references clients
   full_name: string | null;
   created_at: string; // timestamptz
+  business_manager_id: string | null; // uuid, references business_managers; null = super_admin sees all
 }
 
 export interface ClientRow {
@@ -19,6 +28,7 @@ export interface ClientRow {
   slug: string;
   logo_url: string | null;
   created_at: string;
+  business_manager_id: string | null; // uuid, references business_managers
 }
 
 export interface AdAccountRow {
@@ -102,12 +112,25 @@ export interface Database {
       campaign_metrics_daily: TableShape<CampaignMetricsDailyRow>;
       meta_connections: TableShape<MetaConnectionRow>;
       sync_log: TableShape<SyncLogRow>;
+      business_managers: TableShape<BusinessManagerRow>;
     };
     Views: Record<never, never>;
     Functions: {
       is_staff: {
         Args: Record<never, never>;
         Returns: boolean;
+      };
+      is_super_admin: {
+        Args: Record<never, never>;
+        Returns: boolean;
+      };
+      can_access_client: {
+        Args: { p_client_id: string };
+        Returns: boolean;
+      };
+      current_bm_id: {
+        Args: Record<never, never>;
+        Returns: string | null;
       };
     };
     Enums: {

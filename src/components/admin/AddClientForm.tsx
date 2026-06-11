@@ -8,8 +8,13 @@ import { useActionState, useState } from "react";
 import { createClientAction } from "@/lib/admin/actions";
 import { slugify } from "@/lib/admin/slug";
 import { ResultBanner, SubmitButton, inputClass, labelClass } from "./FormBits";
+import type { BusinessManagerSummary } from "@/lib/admin/data";
 
-export default function AddClientForm() {
+interface Props {
+  businessManagers?: BusinessManagerSummary[];
+}
+
+export default function AddClientForm({ businessManagers = [] }: Props) {
   const [result, action] = useActionState(createClientAction, null);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
@@ -69,6 +74,37 @@ export default function AddClientForm() {
           placeholder="https://…/logo.png"
           className={inputClass}
         />
+      </div>
+
+      <div className="space-y-1.5">
+        <label htmlFor="business_manager_id" className={labelClass}>
+          Business manager
+        </label>
+        {businessManagers.length === 0 ? (
+          <p className="text-xs text-amber-400">
+            No business managers configured yet. Add one in the database first.
+          </p>
+        ) : (
+          <select
+            id="business_manager_id"
+            name="business_manager_id"
+            required
+            defaultValue=""
+            className={inputClass}
+          >
+            <option value="" disabled>
+              Select a business manager…
+            </option>
+            {businessManagers.map((bm) => (
+              <option key={bm.id} value={bm.id}>
+                {bm.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <p className="text-xs text-neutral-500">
+          Admin/staff users scoped to this business manager will see this client.
+        </p>
       </div>
 
       <ResultBanner result={result} />
