@@ -1,8 +1,9 @@
 import Link from "next/link";
-import { requireStaff } from "@/lib/auth";
+import { requireStaff, isSuperAdmin } from "@/lib/auth";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
 import { getAdminClients, getBusinessManagers } from "@/lib/admin/data";
 import AddClientForm from "@/components/admin/AddClientForm";
+import InviteStaffForm from "@/components/admin/InviteStaffForm";
 
 // Admin landing: manage all clients. Staff-only. force-dynamic because it
 // reads the session + live DB on every request.
@@ -11,16 +12,21 @@ export const dynamic = "force-dynamic";
 export default async function AdminHome() {
   // Gate first — redirects non-staff away. Skipped only when Supabase is off
   // (offline build), where we show a setup message instead.
-  if (isSupabaseConfigured()) {
-    await requireStaff();
-  } else {
+  if (!isSupabaseConfigured()) {
     return <NotConfigured />;
   }
+  const profile = await requireStaff();
+  const callerIsSuperAdmin = isSuperAdmin(profile);
 
   const [clients, businessManagers] = await Promise.all([
     getAdminClients(),
     getBusinessManagers(),
   ]);
+
+  // Non-super_admins should only see their own BM in the dropdown options.
+  const inviteBms = callerIsSuperAdmin
+    ? businessManagers
+    : businessManagers.filter((bm) => bm.id === profile.business_manager_id);
 
   return (
     <main className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
@@ -73,10 +79,27 @@ export default async function AdminHome() {
           )}
         </section>
 
-        {/* Add a client */}
-        <section className="rounded-xl border border-white/10 bg-neutral-900/50 p-6">
-          <h2 className="mb-4 text-lg font-semibold text-white">Add a client</h2>
-          <AddClientForm businessManagers={businessManagers} />
+        {/* Add a client + Invite admin/staff */}
+        <section className="space-y-6">
+          <div className="rounded-xl border border-white/10 bg-neutral-900/50 p-6">
+            <h2 className="mb-4 text-lg font-semibold text-white">Add a client</h2>
+            <AddClientForm businessManagers={businessManagers} />
+          </div>
+
+          <div className="rounded-xl border border-white/10 bg-neutral-900/50 p-6">
+            <h2 className="text-lg font-semibold text-white">
+              Invite admin or staff
+            </h2>
+            <p className="mt-1 mb-4 text-sm text-neutral-400">
+              Create a login for someone on your team. They&apos;ll see clients
+              under their business manager.
+            </p>
+            <InviteStaffForm
+              businessManagers={inviteBms}
+              callerIsSuperAdmin={callerIsSuperAdmin}
+              callerBusinessManagerId={profile.business_manager_id}
+            />
+          </div>
         </section>
       </div>
     </main>

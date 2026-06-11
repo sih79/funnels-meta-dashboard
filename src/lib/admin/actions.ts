@@ -13,7 +13,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { requireStaff } from "@/lib/auth";
+import { requireStaff, isSuperAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
@@ -324,6 +324,104 @@ export async function inviteClientLoginAction(
     ok: true,
     message: `Login created. Email: ${email} · Temporary password: ${tempPassword} — copy these now and send them to the client. Ask them to change the password after first sign-in.`,
   };
+}
+
+/**
+ * Invite an admin or staff login (Phase 5b).
+ *
+ * Creates a new auth user with a supplied email/password and tags their
+ * profile with role ('admin'|'staff') + business_manager_id, so they show up
+ * in the staff scope for that BM. Permission rules:
+ *  - Only super_admins may invite into a business manager other than their own.
+ *  - A regular admin/staff caller can only invite into THEIR OWN BM.
+ *  - 'super_admin' and 'client' roles are NOT allowed via this form — the
+ *    existing inviteClientLoginAction handles 'client'; super_admin must be
+ *    promoted directly in the database.
+ */
+export async function inviteStaffAction(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  const caller = await requireStaff();
+  if (!isSupabaseConfigured()) {
+    return { ok: false, message: "Set up Supabase first (see SETUP.md)." };
+  }
+
+  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  const password = String(formData.get("password") ?? "");
+  const role = String(formData.get("role") ?? "").trim();
+  const businessManagerId = String(formData.get("business_manager_id") ?? "").trim();
+  const fullName = String(formData.get("full_name") ?? "").trim();
+
+  if (!email || !email.includes("@")) {
+    return { ok: false, message: "Please enter a valid email address." };
+  }
+  if (!password || password.length < 8) {
+    return { ok: false, message: "Password must be at least 8 characters." };
+  }
+  if (role !== "admin" && role !== "staff") {
+    return { ok: false, message: "Role must be Admin or Staff." };
+  }
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!businessManagerId || !uuidRe.test(businessManagerId)) {
+    return { ok: false, message: "Please select a business manager." };
+  }
+
+  // Permission gate: non-super_admins can only invite into their OWN BM.
+  const callerIsSuperAdmin = isSuperAdmin(caller);
+  if (!callerIsSuperAdmin) {
+    if (!caller.business_manager_id || caller.business_manager_id !== businessManagerId) {
+      return {
+        ok: false,
+        message: "You can only invite into your own business manager.",
+      };
+    }
+  }
+
+  const admin = createAdminClient();
+
+  // 1. Create the auth user. Email-confirmed because the admin hands the
+  // password over manually (no email delivery yet).
+  const { data: created, error: createErr } = await admin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: fullName ? { full_name: fullName } : undefined,
+  });
+
+  if (createErr) {
+    const alreadyExists =
+      /already|registered|exists/i.test(createErr.message) ||
+      (createErr as { status?: number }).status === 422;
+    if (alreadyExists) {
+      return {
+        ok: false,
+        message: "That email already has a login. Promote them in Supabase or use a different email.",
+      };
+    }
+    return { ok: false, message: `Could not create login: ${createErr.message}` };
+  }
+
+  const userId = created?.user?.id;
+  if (!userId) {
+    return { ok: false, message: "Login was created but no user id came back. Check Supabase." };
+  }
+
+  // 2. Update the profile (created by the 0003 trigger on auth.users insert).
+  const { error: profileErr } = await admin
+    .from("profiles")
+    .update({
+      role: role as "admin" | "staff",
+      business_manager_id: businessManagerId,
+      full_name: fullName || null,
+    } as never)
+    .eq("id", userId);
+  if (profileErr) {
+    return { ok: false, message: `Created login but could not set role: ${profileErr.message}` };
+  }
+
+  revalidatePath("/admin");
+  return { ok: true, message: "Admin invited" };
 }
 
 // Look up an auth user's id by email by paging through admin.listUsers.
