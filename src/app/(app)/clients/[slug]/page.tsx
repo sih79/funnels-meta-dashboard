@@ -51,7 +51,12 @@ export default async function ClientDashboardPage({
   return (
     <>
       {showTabs && <ClientTabs clients={clients} />}
-      <ClientDashboard data={data} clientName={client.name} range={range} />
+      <ClientDashboard
+        data={data}
+        clientName={client.name}
+        clientSlug={client.slug}
+        range={range}
+      />
     </>
   );
 }

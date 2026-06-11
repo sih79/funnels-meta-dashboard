@@ -9,6 +9,7 @@
 // Reach + CTR pair so the dashboard stays balanced.
 
 import KpiCard from "@/components/KpiCard";
+import CostPerResultCard from "@/components/CostPerResultCard";
 import CampaignTable from "@/components/CampaignTable";
 import DailyTable from "@/components/DailyTable";
 import { LeadsCplChart, SpendRoasChart } from "@/components/Charts";
@@ -23,10 +24,12 @@ const MAX_CONVERSION_KPIS = 6;
 export default function ClientDashboard({
   data,
   clientName,
+  clientSlug,
   range,
 }: {
   data: DashboardData;
   clientName: string;
+  clientSlug: string;
   range: ResolvedRange;
 }) {
   const t = data.totals;
@@ -83,6 +86,12 @@ export default function ClientDashboard({
             />
             <KpiCard label="CTR" value={pct(t.ctr, 2)} sub={`${num(t.clicks)} clicks`} />
             <KpiCard label="CPC" value={gbp(t.cpc)} sub={`${num(t.impressions)} impressions`} />
+            <CostPerResultCard
+              trackedConversions={tracked}
+              conversionTotals={t.conversionTotals}
+              costPerConversion={t.costPerConversion}
+              storageKey={`fdash:cpr:${clientSlug}`}
+            />
             {tracked.length === 0 ? (
               <>
                 <KpiCard
